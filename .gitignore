@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.log
+
+# Containerlab runtime artifacts — regenerated on every `clab deploy`
+clab-*/
+.clab.lock
+*.clab.yml.bak
+
+# cEOS images — large, license-restricted, NEVER commit
+*.tar
+*.tar.xz
+*.tar.gz
+cEOS*
+cEOSlab*
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.swix

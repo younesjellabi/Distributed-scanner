@@ -83,7 +83,112 @@ on a workstation — capture where you must, analyze where it's cheap.
 
 ---
 
-## 3. The "minimum on-device container" question
+## 3. Network attachment model
+
+### Core constraint
+
+**The on-device scanner container MUST operate from the data plane of
+the Arista device, not the management interface.**
+
+The entire architectural value of running the scanner on the EOS device
+depends on its visibility into the site's production network. Attaching
+the container to the management interface (Management0 / Ma1) would
+confine it to the management VRF — a small, isolated subnet containing
+only switches and NMS endpoints. From that vantage point the scanner
+would be blind to the user subnets, server VLANs, and inter-site routing
+that are the actual scan targets.
+
+### On real EOS hardware
+
+The scanner container is attached to a **specific data-plane VRF**,
+which in Linux terms is a specific network namespace scoped to that
+VRF's interfaces and routing table. The container:
+
+- Sees only the data-plane VRF's interfaces and routes.
+- Does not see or use Management0.
+- Cannot reach other VRFs except through explicit inter-VRF routing policy.
+- Scans hosts via the EOS data plane — the same path production traffic takes.
+
+The specific VRF choice is site-dependent. Typical patterns:
+- A dedicated `SCANNER` or `OPS-TOOLS` VRF with leaks into target VRFs
+- The existing `USER` / `default` data-plane VRF, if the site is single-VRF
+- A management-adjacent VRF that has routing into user subnets (less common, more permissive)
+
+### EOS-side mechanism (validated against Arista documentation)
+
+EOS represents each configured VRF as a Linux network namespace named
+`ns-<vrf-name>`. For example, VRF `USER` is visible to Linux as
+network namespace `ns-USER`. This is the same mechanism Arista's own
+native daemons (TerminAttr, telemetry exporters) use to operate
+across VRFs.
+
+A container can be launched into a specific VRF's namespace using
+either of two documented methods:
+
+1. **Direct namespace placement:**
+   ```
+   ip netns exec ns-USER docker run --network none <image>
+   ```
+   followed by interface assignment inside the namespace. The
+   container has full L3 reachability via the VRF's routing table.
+
+2. **macvlan bridging to a VLAN/SVI:**
+   ```
+   docker network create -d macvlan \
+     --subnet=<user-subnet> -o parent=vlan<N> <net-name>
+   docker run --network <net-name> <image>
+   ```
+   The container appears as an L2 host on that VLAN with the SVI as
+   its default gateway.
+
+Method 1 is preferred when the scanner needs visibility across multiple
+subnets reachable through a single VRF's routing. Method 2 is preferred
+when the scanner is scoped to a single VLAN.
+
+### Docker daemon placement
+
+The Docker daemon itself runs in the **default network namespace** on
+EOS. This is a fixed behavior, not a per-container setting. The
+consequence: any network activity initiated by the daemon itself —
+notably pulling images from a registry — uses the default VRF's
+routing, regardless of which VRF the eventual container will run in.
+This constrains image distribution strategy in Phase 3
+(see `lab-vs-prod-gaps.md`, Gap 4).
+
+### Production lifecycle: Container Manager
+
+Raw `docker run` invocations do not survive an EOS reload. For
+production deployment, containers should be declared as EOS
+`daemon` configuration blocks, which EOS Container Manager supervises
+as native EOS agents: started on boot, restarted on crash, placed into
+the declared VRF's namespace. This is the production-blessed pattern
+and is what Phase 3 will target. Phase 2 will validate the exact
+configuration syntax on lab-grade hardware.
+
+### In the containerlab POC
+
+The lab simulates this attachment model by connecting the scanner
+container via a veth pair to a cEOS data-plane interface (e.g.,
+Ethernet1), giving the scanner a data-plane IP and data-plane routing.
+The cEOS management interface remains dedicated to lab orchestration
+(SSH, containerlab control) and is explicitly not used by the scanner.
+
+This proves the **data flow and probe logic** work correctly through a
+data-plane attachment. It does NOT validate the EOS-native mechanism
+for placing a container into a data-plane VRF on real hardware — that
+is a Phase 2 concern. See `lab-vs-prod-gaps.md`, Gap 3.
+
+### Out of scope for the scanner container
+
+- No inbound reachability from the site LAN to the scanner. The
+  container exposes no listening ports on the data-plane side.
+- No use of Management0 by the container.
+- No inter-VRF routing performed by the container itself; it relies on
+  the device's routing policy for reachability.
+
+---
+
+## 4. The "minimum on-device container" question
 
 This is the most important open question in Phase 1 and the single
 biggest driver of whether this project is security-team-approvable.
@@ -130,7 +235,7 @@ The true minimum is:
 
 ---
 
-## 4. Open questions
+## 5. Open questions
 
 These drive the remaining Phase 1 work. Each must be answered by
 experiment, not assertion.
@@ -190,9 +295,28 @@ Options range from mTLS with per-device certs (best, most work) to
 shared bearer tokens (worst, easiest). Phase 2 concern but flagging
 now.
 
+### Q6. Which VRF will the scanner attach to in production?
+
+The VRF strategy is site-dependent and must be answered per target
+environment before rollout:
+
+- Are production Arista sites typically **single-VRF** (everything in
+  default) or **multi-VRF** (separate VRFs for user, guest, OT,
+  management)?
+- If multi-VRF, is there an existing VRF that could serve as the
+  scanner's home, with routing into target user VRFs? Or will this
+  project need to introduce a new VRF (e.g., `OPS-SCAN`) at every
+  site?
+- If a new VRF is introduced, does that require coordination with
+  the routing team and a change window at each site?
+
+**To decide:** audit the target fleet's VRF topology before Phase 3
+planning. This question, unanswered, can kill a rollout at site #4 of
+500.
+
 ---
 
-## 5. Networking model
+## 6. Networking model
 
 ### In the lab (containerlab)
 
@@ -208,11 +332,10 @@ now.
 
 - Scanner container runs **inside** EOS's Docker runtime, not as a
   sibling.
-- The container is attached to an EOS-side Linux interface that
-  bridges to a VLAN/SVI on the device — giving it L3 presence on the
-  site subnet.
+- The container is placed into a data-plane VRF's Linux namespace
+  (`ns-<vrf>`), giving it L3 presence scoped to that VRF.
 - Outbound traffic to the collector traverses the device's normal
-  routing table.
+  routing table for that VRF.
 
 ### Mapping to networking concepts
 
@@ -226,10 +349,11 @@ now.
 | Image                   | Software image (EOS `.swi`)              |
 | Registry                | Artifact server / image store            |
 | `.swix` extension       | EOS-native package wrapping the container|
+| Cgroup                  | QoS policer                              |
 
 ---
 
-## 6. Data flow and data model
+## 7. Data flow and data model
 
 <!-- DECIDE: this section is a stub. Fill in once the probe + collector
 contract is designed. Key questions:
@@ -244,7 +368,7 @@ contract).*
 
 ---
 
-## 7. What we are explicitly NOT doing
+## 8. What we are explicitly NOT doing
 
 Stating non-goals is as important as stating goals. It prevents scope
 creep and makes security review cleaner.
@@ -261,27 +385,34 @@ creep and makes security review cleaner.
 
 ---
 
-## 8. Decision log
+## 9. Decision log
 
 A running list of decisions with dates and rationale. Add to this as
 we go; it's how future-you reconstructs *why*.
 
 | Date       | Decision | Rationale |
 |------------|----------|-----------|
-| <!-- DECIDE -->| Start POC in containerlab, not on real EOS first. | Iteration speed; de-risk the container pipeline before touching hardware. |
-| <!-- DECIDE -->| On-device container is probe-only + safety; enrichment is central. | Minimize attack surface, resource footprint, and per-site maintenance. |
-| <!-- DECIDE -->| Outbound HTTPS only; no inbound listener on site LAN. | Security posture; matches how network devices already talk to management systems. |
+| <!-- DECIDE: date --> | Start POC in containerlab, not on real EOS first. | Iteration speed; de-risk the container pipeline before touching hardware. |
+| <!-- DECIDE: date --> | On-device container is probe-only + safety; enrichment is central. | Minimize attack surface, resource footprint, and per-site maintenance. |
+| <!-- DECIDE: date --> | Outbound HTTPS only; no inbound listener on site LAN. | Security posture; matches how network devices already talk to management systems. |
+| <!-- DECIDE: date --> | Scanner attaches to a data-plane VRF via `ns-<vrf>` namespace, not to Management0. | The project's entire value depends on data-plane visibility. Management-interface placement would leave the scanner blind to production subnets. Validated against Arista documentation (EOS VRF ↔ Linux namespace mapping). |
+| <!-- DECIDE: date --> | Production lifecycle via EOS Container Manager (`daemon` config block), not raw `docker run`. | Raw invocations do not survive reload. Container Manager integrates with EOS lifecycle, startup, and VRF placement natively. |
 
 ---
 
-## 9. Glossary
+## 10. Glossary
 
 - **cEOS** — Containerized Arista EOS. Lab / test form of EOS that
   runs as a container; no ASIC, software forwarding only.
 - **.swix** — Arista EOS extension package format. How we will ship
   the scanner container to production devices in Phase 3.
+- **Container Manager** — EOS subsystem that supervises customer
+  containers declared via `daemon` configuration blocks, handling
+  startup, restart, and VRF placement.
 - **Containerlab** — Tool that builds multi-node network labs from
   YAML topology files using containerized NOS images.
+- **`ns-<vrf>`** — Linux network namespace name corresponding to an
+  EOS VRF. EOS automatically creates and maintains this mapping.
 - **Vantage point** — The network location from which a scan is run.
   The whole premise of this project is that *site-local* vantage
   points see things central vantage points cannot.

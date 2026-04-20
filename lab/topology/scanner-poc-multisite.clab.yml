@@ -1,0 +1,79 @@
+# Phase 1 Step 4: multi-site topology with backbone
+# 2 sites, 1 backbone, scanner only at site 1, OSPF everywhere
+# Scanner targets = loopbacks of the 4 target cEOS devices
+
+name: scanner-poc-multisite
+
+topology:
+  nodes:
+    backbone:
+      kind: arista_ceos
+      image: ceos:4.36.0F
+      cpu: 2
+      memory: 2GB
+      startup-config: configs/backbone.cfg
+
+    site1-spine:
+      kind: arista_ceos
+      image: ceos:4.36.0F
+      cpu: 2
+      memory: 2GB
+      startup-config: configs/site1-spine.cfg
+
+    site1-tgt-a:
+      kind: arista_ceos
+      image: ceos:4.36.0F
+      cpu: 1
+      memory: 2GB
+      startup-config: configs/site1-tgt-a.cfg
+
+    site1-tgt-b:
+      kind: arista_ceos
+      image: ceos:4.36.0F
+      cpu: 1
+      memory: 2GB
+      startup-config: configs/site1-tgt-b.cfg
+
+    site2-spine:
+      kind: arista_ceos
+      image: ceos:4.36.0F
+      cpu: 2
+      memory: 2GB
+      startup-config: configs/site2-spine.cfg
+
+    site2-tgt-a:
+      kind: arista_ceos
+      image: ceos:4.36.0F
+      cpu: 1
+      memory: 2GB
+      startup-config: configs/site2-tgt-a.cfg
+
+    site2-tgt-b:
+      kind: arista_ceos
+      image: ceos:4.36.0F
+      cpu: 1
+      memory: 2GB
+      startup-config: configs/site2-tgt-b.cfg
+
+    scanner1:
+      kind: linux
+      image: alpine:latest
+      cpu: 0.5
+      memory: 256MB
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.1.30.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.1.30.1 dev eth1
+
+  links:
+    # Backbone ↔ spines
+    - endpoints: ["backbone:eth1",    "site1-spine:eth1"]
+    - endpoints: ["backbone:eth2",    "site2-spine:eth1"]
+    # Site 1: spine ↔ targets, spine ↔ scanner
+    - endpoints: ["site1-spine:eth2", "site1-tgt-a:eth1"]
+    - endpoints: ["site1-spine:eth3", "site1-tgt-b:eth1"]
+    - endpoints: ["site1-spine:eth4", "scanner1:eth1"]
+    # Site 2: spine ↔ targets
+    - endpoints: ["site2-spine:eth2", "site2-tgt-a:eth1"]
+    - endpoints: ["site2-spine:eth3", "site2-tgt-b:eth1"]

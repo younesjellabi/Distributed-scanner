@@ -1,0 +1,56 @@
+# Phase 1 Step 3: prove data-plane connectivity.
+#
+# Scanner, target-a, collector each attach to a cEOS data-plane interface
+# via a /24 point-to-point subnet. cEOS routes between them.
+#
+# Note: Containerlab dual-homes each Alpine (mgmt eth0 + data eth1). This
+# is a lab artifact. In Phase 2 (real EOS + Container Manager), the scanner
+# will run in a VRF namespace with only the data-plane interface. We test
+# explicitly with source-interface args to confirm data-plane reachability
+# works even with the mgmt shortcut present.
+
+name: scanner-poc-step3
+
+topology:
+  nodes:
+    site1-eos:
+      kind: arista_ceos
+      image: ceos:4.36.0F
+      cpu: 2
+      memory: 4GB
+      startup-config: site1-eos.startup.cfg
+
+    scanner:
+      kind: linux
+      image: alpine:latest
+      cpu: 0.5
+      memory: 128MB
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.10.10.10/24 dev eth1
+        - ip link set eth1 up
+
+    target-a:
+      kind: linux
+      image: alpine:latest
+      cpu: 0.25
+      memory: 64MB
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.20.20.10/24 dev eth1
+        - ip link set eth1 up
+
+    collector:
+      kind: linux
+      image: alpine:latest
+      cpu: 0.5
+      memory: 128MB
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.30.30.10/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["site1-eos:eth1", "scanner:eth1"]
+    - endpoints: ["site1-eos:eth2", "target-a:eth1"]
+    - endpoints: ["site1-eos:eth3", "collector:eth1"]
